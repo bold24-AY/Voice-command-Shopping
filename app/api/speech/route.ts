@@ -6,7 +6,8 @@ export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const audioFile = formData.get('file') as File;
-    const language = formData.get('language') as string || 'en';
+    // language is optional — if not sent, Whisper auto-detects (best for Gujarati)
+    const language = formData.get('language') as string | null;
 
     if (!audioFile) {
       return NextResponse.json({ error: 'No audio file provided' }, { status: 400 });
@@ -16,15 +17,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'GROQ_API_KEY is not configured' }, { status: 500 });
     }
 
-    // Prepare FormData payload for Groq OpenAI-compatible audio transcription API
     const groqFormData = new FormData();
     groqFormData.append('file', audioFile, audioFile.name || 'audio.webm');
     groqFormData.append('model', 'whisper-large-v3');
     groqFormData.append('response_format', 'json');
-    if (language) {
-      // Map language codes to ISO 639-1 (e.g. en-IN -> en, hi-IN -> hi, gu-IN -> gu)
-      const shortLang = language.split('-')[0];
-      groqFormData.append('language', shortLang);
+
+    // Only set language when explicitly known — omit it for auto-detect (Gujarati, mixed etc.)
+    if (language && language.trim() !== '') {
+      groqFormData.append('language', language.trim());
     }
 
     const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
@@ -44,7 +44,9 @@ export async function POST(req: NextRequest) {
     const data = await response.json();
     const transcript = data.text || '';
 
-    return NextResponse.json({ transcript });
+    console.log(`[Speech] lang=${language || 'auto'} → "${transcript}"`);
+
+    return NextResponse.json({ transcript, detected_language: data.language });
   } catch (error: any) {
     console.error('Speech Route Error:', error);
     return NextResponse.json(
