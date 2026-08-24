@@ -5,7 +5,7 @@
 
 ---
 
-## 📝 Candidate Submission Writeup (200 Words Max)
+## 📝 Candidate Submission Writeup 
 
 > **Approach & Architecture Summary:**  
 > The Voice Command Shopping Assistant is designed as a resilient, voice-first e-commerce companion. The core architecture uses the browser's native **Web Speech API** for zero-latency speech-to-text, paired with **Google Gemini AI** for structured Natural Language Processing (NLP). Instead of unstructured text generation, Gemini normalizes complex, multi-lingual voice commands (English, Hindi, Gujarati, Spanish, French) into strict JSON domain intents (`ADD_ITEM`, `REMOVE_ITEM`, `SEARCH_PRODUCTS`, `FILTER_PRICE`). 
@@ -42,7 +42,7 @@
 
 ```
                                   ┌───────────────────────────┐
-                                  │   Flipkart-Inspired UI    │
+                                  │            UI             │
                                   │   Next.js 14 / Tailwind   │
                                   └─────────────┬─────────────┘
                                                 │
