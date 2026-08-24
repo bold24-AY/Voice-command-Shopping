@@ -13,6 +13,7 @@ interface HeaderProps {
   setSearchQuery: (query: string) => void;
   onResetDemo: () => void;
   onMicClick: () => void;
+  onCartClick?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -24,7 +25,8 @@ export const Header: React.FC<HeaderProps> = ({
   searchQuery,
   setSearchQuery,
   onResetDemo,
-  onMicClick
+  onMicClick,
+  onCartClick
 }) => {
   const languages = [
     { code: 'en-IN', label: 'English (IN)' },
@@ -67,7 +69,7 @@ export const Header: React.FC<HeaderProps> = ({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search products (e.g. 'organic apples under $5', 'milk')..."
-              className="w-[#100%] pl-4 pr-20 py-2 rounded-sm text-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-[#ffe500] bg-white shadow-inner"
+              className="w-full pl-4 pr-20 py-2 rounded-sm text-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-[#ffe500] bg-white shadow-inner"
             />
             <div className="absolute right-1 top-1 bottom-1 flex items-center gap-1">
               <button
@@ -117,13 +119,16 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
 
             {/* CART COUNT & TOTAL BADGE */}
-            <div className="flex items-center bg-[#ffe500] text-[#2874f0] px-3 py-1.5 rounded-sm font-bold text-xs shadow-sm gap-2">
-              <ShoppingBag className="w-4 h-4" />
+            <button
+              onClick={onCartClick}
+              className="flex items-center bg-[#ffe500] text-[#2874f0] hover:bg-[#ffbe00] px-3.5 py-1.5 rounded-sm font-bold text-xs shadow-md gap-2 transition-all transform hover:scale-105"
+            >
+              <ShoppingBag className="w-4 h-4 text-[#2874f0]" />
               <div className="flex flex-col text-left leading-tight">
                 <span>{itemCount} {itemCount === 1 ? 'Item' : 'Items'}</span>
                 <span className="text-[10px] text-[#fb641b] font-extrabold">${totalPrice.toFixed(2)}</span>
               </div>
-            </div>
+            </button>
 
           </div>
 

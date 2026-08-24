@@ -10,7 +10,7 @@ import { ProductSearchCatalog } from '@/components/ProductSearchCatalog';
 import { useVoiceRecognition } from '@/hooks/useVoiceRecognition';
 import { supabase, INITIAL_PRODUCTS, INITIAL_SHOPPING_ITEMS, INITIAL_SUGGESTIONS } from '@/lib/supabase';
 import { ShoppingItem, Product, PurchaseHistoryItem, VoiceIntentResult, CategoryType } from '@/types';
-import { Sparkles, CheckCircle2, ShieldCheck, Zap } from 'lucide-react';
+import { Sparkles, CheckCircle2, ShieldCheck, Zap, ShoppingBag, AlertTriangle, XCircle } from 'lucide-react';
 
 export default function Home() {
   const [items, setItems] = useState<ShoppingItem[]>([]);
@@ -18,12 +18,12 @@ export default function Home() {
   const [suggestions, setSuggestions] = useState<PurchaseHistoryItem[]>(INITIAL_SUGGESTIONS);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [priceFilter, setPriceFilter] = useState<{ maxPrice?: number; minPrice?: number } | undefined>(undefined);
-  const [activeToast, setActiveToast] = useState<{ message: string; type: 'success' | 'info' } | null>(null);
+  const [activeToast, setActiveToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
-  // Trigger Toast Notification
-  const showToast = (message: string, type: 'success' | 'info' = 'success') => {
+  // Trigger Toast Notification (Support Error Type)
+  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
     setActiveToast({ message, type });
-    setTimeout(() => setActiveToast(null), 3500);
+    setTimeout(() => setActiveToast(null), 4500);
   };
 
   // LOAD INITIAL DATA FROM SUPABASE OR IN-MEMORY FALLBACK
@@ -54,49 +54,114 @@ export default function Home() {
     loadData();
   }, []);
 
-  // VOICE INTENT HANDLER
+  // CATALOG FUZZY MATCHING HELPER
+  const findCatalogProduct = useCallback((requestedName: string, catalogList: Product[]): Product | null => {
+    const cleanReq = requestedName.toLowerCase().trim();
+    if (!cleanReq) return null;
+
+    // 1. Exact match
+    const exact = catalogList.find(p => p.name.toLowerCase() === cleanReq);
+    if (exact) return exact;
+
+    // 2. Substring match (e.g. "milk" -> "Fresh Whole Milk", "apples" -> "Organic Apples (Gala)")
+    const substringMatch = catalogList.find(p => p.name.toLowerCase().includes(cleanReq) || cleanReq.includes(p.name.toLowerCase()));
+    if (substringMatch) return substringMatch;
+
+    // 3. Keyword token matching (e.g. "apple" in "Organic Apples", "bread" in "Whole Wheat Bread")
+    const words = cleanReq.split(/\s+/).filter(w => w.length > 2);
+    for (const word of words) {
+      const match = catalogList.find(p => 
+        p.name.toLowerCase().includes(word) || 
+        p.category.toLowerCase().includes(word) ||
+        p.brand.toLowerCase().includes(word)
+      );
+      if (match) return match;
+    }
+
+    return null;
+  }, []);
+
+  // VOICE INTENT HANDLER WITH STRICT CATALOG VALIDATION & ERROR BANNERS
   const handleVoiceIntent = useCallback((result: VoiceIntentResult) => {
     console.log('Voice Intent Received:', result);
 
+    // If Gemini explicit error or unmatched item was flagged
+    if (result.errorMessage || result.unmatchedItem) {
+      showToast(result.errorMessage || `Item '${result.unmatchedItem}' is not available in our store catalog.`, 'error');
+      return;
+    }
+
+    // 1. ADD ITEM INTENT
     if (result.intent === 'ADD_ITEM' && result.items && result.items.length > 0) {
+      const extracted = result.items[0];
+      const rawName = extracted.name;
+
+      // Validate against catalog
+      const matchedCatalogProd = findCatalogProduct(rawName, products);
+
+      if (!matchedCatalogProd) {
+        // REJECT NON-CATALOG ITEM WITH RED ERROR BANNER
+        showToast(`Item "${rawName}" is not available in our store catalog. Please check available products below.`, 'error');
+        return;
+      }
+
+      // Catalog Product Found - Add to Shopping Cart
       setItems(prev => {
-        let updated = [...prev];
-        result.items?.forEach(extracted => {
-          const existingIdx = updated.findIndex(i => i.name.toLowerCase() === extracted.name.toLowerCase());
-          if (existingIdx >= 0) {
-            updated[existingIdx] = {
-              ...updated[existingIdx],
-              quantity: updated[existingIdx].quantity + extracted.quantity
-            };
-          } else {
-            updated.unshift({
-              id: 'item-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
-              name: extracted.name,
-              category: extracted.category || 'Pantry',
-              quantity: extracted.quantity || 1,
-              unit: extracted.unit || 'pack',
-              is_completed: false,
-              price: extracted.price || 3.50,
-              created_at: new Date().toISOString()
-            });
-          }
-        });
-        return updated;
+        const existingIdx = prev.findIndex(i => i.name.toLowerCase() === matchedCatalogProd.name.toLowerCase());
+        if (existingIdx >= 0) {
+          const updated = [...prev];
+          updated[existingIdx] = {
+            ...updated[existingIdx],
+            quantity: updated[existingIdx].quantity + (extracted.quantity || 1)
+          };
+          return updated;
+        }
+        return [
+          {
+            id: 'item-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+            name: matchedCatalogProd.name,
+            category: matchedCatalogProd.category,
+            quantity: extracted.quantity || 1,
+            unit: matchedCatalogProd.unit,
+            is_completed: false,
+            price: matchedCatalogProd.price,
+            created_at: new Date().toISOString()
+          },
+          ...prev
+        ];
       });
 
-      showToast(`Added ${result.items.map(i => `${i.quantity} ${i.name}`).join(', ')} to shopping list!`);
+      showToast(`Added ${extracted.quantity || 1} ${matchedCatalogProd.name} to your shopping list!`, 'success');
     } 
+    // 2. REMOVE ITEM INTENT
     else if (result.intent === 'REMOVE_ITEM' && result.items && result.items.length > 0) {
-      const itemToRemove = result.items[0].name.toLowerCase();
-      setItems(prev => prev.filter(i => !i.name.toLowerCase().includes(itemToRemove)));
-      showToast(`Removed "${result.items[0].name}" from your list`, 'info');
+      const targetQuery = result.items[0].name.toLowerCase().trim();
+
+      setItems(prev => {
+        const matchIdx = prev.findIndex(i => 
+          i.name.toLowerCase().includes(targetQuery) || targetQuery.includes(i.name.toLowerCase())
+        );
+
+        if (matchIdx >= 0) {
+          const removedName = prev[matchIdx].name;
+          const updated = prev.filter((_, idx) => idx !== matchIdx);
+          showToast(`Removed "${removedName}" from your shopping list`, 'info');
+          return updated;
+        } else {
+          // ITEM NOT FOUND IN CART - SHOW RED ERROR BANNER
+          showToast(`Item "${result.items?.[0]?.name}" was not found in your cart list to remove.`, 'error');
+          return prev;
+        }
+      });
     }
+    // 3. SEARCH PRODUCTS INTENT
     else if (result.intent === 'SEARCH_PRODUCTS') {
       if (result.searchQuery) {
         setSearchQuery(result.searchQuery);
-        showToast(`Filtered catalogue for "${result.searchQuery}"`, 'info');
+        showToast(`Filtered catalog for "${result.searchQuery}"`, 'info');
       }
     }
+    // 4. FILTER PRODUCTS INTENT
     else if (result.intent === 'FILTER_PRODUCTS') {
       if (result.priceFilter) {
         setPriceFilter(result.priceFilter);
@@ -104,11 +169,16 @@ export default function Home() {
         showToast(`Filtered items under $${result.priceFilter.maxPrice}`, 'info');
       }
     }
+    // 5. CLEAR LIST INTENT
     else if (result.intent === 'CLEAR_LIST') {
       setItems([]);
       showToast('Cleared all items from your shopping list', 'info');
     }
-  }, []);
+    // UNKNOWN INTENT
+    else if (result.intent === 'UNKNOWN') {
+      showToast(result.errorMessage || 'Command not recognized. Please try asking for grocery items in our catalog.', 'error');
+    }
+  }, [products, findCatalogProduct]);
 
   // INITIALIZE VOICE HOOK
   const voice = useVoiceRecognition(handleVoiceIntent);
@@ -164,7 +234,7 @@ export default function Home() {
         ...prev
       ];
     });
-    showToast(`Added "${name}" to your list!`);
+    showToast(`Added "${name}" to your cart list!`, 'success');
   };
 
   // RESET DEMO DATA
@@ -175,6 +245,14 @@ export default function Home() {
     setSearchQuery('');
     setPriceFilter(undefined);
     showToast('Reset to default demo data', 'info');
+  };
+
+  // SMOOTH SCROLL TO CART SECTION
+  const handleScrollToCart = () => {
+    const el = document.getElementById('shopping-cart-section');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth' });
+    }
   };
 
   const totalItemsCount = items.length;
@@ -195,24 +273,33 @@ export default function Home() {
         setSearchQuery={setSearchQuery}
         onResetDemo={handleResetDemo}
         onMicClick={voice.isListening ? voice.stopListening : voice.startListening}
+        onCartClick={handleScrollToCart}
       />
 
-      {/* TOAST FEEDBACK FLOATING PILL */}
+      {/* TOAST FEEDBACK FLOATING BANNER (SUPPORTING RED ERROR BADGE) */}
       {activeToast && (
-        <div className="fixed bottom-6 right-6 z-50 animate-bounce">
-          <div className={`px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2 text-xs font-bold text-white border ${
-            activeToast.type === 'success' ? 'bg-emerald-600 border-emerald-400' : 'bg-[#2874f0] border-blue-300'
+        <div className="fixed bottom-6 right-6 z-50 animate-bounce max-w-md">
+          <div className={`px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 text-xs font-bold text-white border ${
+            activeToast.type === 'error'
+              ? 'bg-rose-600 border-rose-400 ring-2 ring-rose-300'
+              : activeToast.type === 'success'
+              ? 'bg-emerald-600 border-emerald-400'
+              : 'bg-[#2874f0] border-blue-300'
           }`}>
-            <CheckCircle2 className="w-4 h-4" />
+            {activeToast.type === 'error' ? (
+              <XCircle className="w-5 h-5 shrink-0 text-white" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-white" />
+            )}
             <span>{activeToast.message}</span>
           </div>
         </div>
       )}
 
       {/* MAIN CONTAINER */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-10">
         
-        {/* VOICE HERO CONTROL CENTER */}
+        {/* 1. HERO VOICE CONTROL CENTER */}
         <VoiceControlCenter
           isListening={voice.isListening}
           isProcessing={voice.isProcessing}
@@ -225,43 +312,58 @@ export default function Home() {
           onSubmitManualText={voice.submitManualText}
         />
 
-        {/* 2-COLUMN CORE WORKSPACE */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* 2. TOP PRIMARY SECTION: ALL PRODUCTS CATALOG */}
+        <section>
+          <ProductSearchCatalog
+            products={products}
+            searchQuery={searchQuery}
+            priceFilter={priceFilter}
+            onAddToCart={(prod) => handleAddCustom(prod.name, prod.category, 1, prod.unit, prod.price)}
+          />
+        </section>
+
+        {/* 3. SECONDARY SECTION: SHOPPING CART LIST & SMART SUGGESTIONS */}
+        <section id="shopping-cart-section" className="pt-6 border-t border-gray-200">
           
-          {/* LEFT COLUMN: SHOPPING LIST (7 COLS) */}
-          <div className="lg:col-span-7 space-y-6">
-            <ShoppingList
-              items={items}
-              onToggleComplete={handleToggleComplete}
-              onUpdateQuantity={handleUpdateQuantity}
-              onDeleteItem={handleDeleteItem}
-              onClearAll={handleClearAll}
-            />
+          <div className="flex items-center gap-2 mb-6">
+            <div className="p-2 bg-[#2874f0] text-white rounded-lg shadow-sm">
+              <ShoppingBag className="w-5 h-5 text-[#ffe500]" />
+            </div>
+            <div>
+              <h2 className="font-extrabold text-xl text-gray-900">Your Active Shopping Cart & Reorder Hub</h2>
+              <p className="text-xs text-gray-500">Managed via voice commands or manual controls</p>
+            </div>
           </div>
 
-          {/* RIGHT COLUMN: SMART SUGGESTIONS (5 COLS) */}
-          <div className="lg:col-span-5 space-y-6">
-            <SmartSuggestions
-              suggestions={suggestions}
-              seasonalProducts={seasonalProducts}
-              onAddSuggestion={handleAddCustom}
-            />
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            
+            {/* LEFT COLUMN: SHOPPING CART LIST (7 COLS) */}
+            <div className="lg:col-span-7 space-y-6">
+              <ShoppingList
+                items={items}
+                onToggleComplete={handleToggleComplete}
+                onUpdateQuantity={handleUpdateQuantity}
+                onDeleteItem={handleDeleteItem}
+                onClearAll={handleClearAll}
+              />
+            </div>
+
+            {/* RIGHT COLUMN: SMART SUGGESTIONS (5 COLS) */}
+            <div className="lg:col-span-5 space-y-6">
+              <SmartSuggestions
+                suggestions={suggestions}
+                seasonalProducts={seasonalProducts}
+                onAddSuggestion={handleAddCustom}
+              />
+            </div>
+
           </div>
-
-        </div>
-
-        {/* VOICE-ACTIVATED PRODUCT CATALOG SEARCH SECTION */}
-        <ProductSearchCatalog
-          products={products}
-          searchQuery={searchQuery}
-          priceFilter={priceFilter}
-          onAddToCart={(prod) => handleAddCustom(prod.name, prod.category, 1, prod.unit, prod.price)}
-        />
+        </section>
 
       </main>
 
       {/* FOOTER */}
-      <footer className="bg-white border-t border-gray-200 mt-12 py-6 text-xs text-gray-500">
+      <footer className="bg-white border-t border-gray-200 mt-16 py-6 text-xs text-gray-500">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-[#2874f0]" />
@@ -269,7 +371,7 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-4 text-gray-600">
             <span className="flex items-center gap-1 font-semibold text-gray-800">
-              <Zap className="w-3.5 h-3.5 text-[#fb641b]" /> Powered by Gemini AI & Supabase
+              <Zap className="w-3.5 h-3.5 text-[#fb641b]" /> Powered by Gemini AI & Groq Whisper
             </span>
           </div>
         </div>

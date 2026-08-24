@@ -14,20 +14,24 @@ export function useVoiceRecognition(onIntentProcessed?: (result: VoiceIntentResu
   });
 
   const [isSupported, setIsSupported] = useState<boolean>(true);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
   const recognitionRef = useRef<any>(null);
 
+  // Check audio capabilities
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      const hasMediaDevices = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (!SpeechRecognition) {
-        setIsSupported(false);
-      }
+      setIsSupported(hasMediaDevices || !!SpeechRecognition);
     }
   }, []);
 
+  // Audio Speech Synthesis playback
   const speakText = useCallback((text: string, lang: string = 'en-US') => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel(); // cancel previous utterances
+      window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 1.0;
       utterance.pitch = 1.0;
@@ -36,8 +40,12 @@ export function useVoiceRecognition(onIntentProcessed?: (result: VoiceIntentResu
     }
   }, []);
 
+  // Send transcript to Gemini NLP route
   const processTranscript = useCallback(async (textToProcess: string, lang: string) => {
-    if (!textToProcess.trim()) return;
+    if (!textToProcess.trim()) {
+      setState(prev => ({ ...prev, isProcessing: false, isListening: false }));
+      return;
+    }
 
     setState(prev => ({ ...prev, isProcessing: true, error: null }));
 
@@ -49,7 +57,7 @@ export function useVoiceRecognition(onIntentProcessed?: (result: VoiceIntentResu
       });
 
       if (!response.ok) {
-        throw new Error('Failed to parse voice command');
+        throw new Error('Failed to process voice command with AI');
       }
 
       const result: VoiceIntentResult = await response.json();
@@ -68,84 +76,173 @@ export function useVoiceRecognition(onIntentProcessed?: (result: VoiceIntentResu
         onIntentProcessed(result);
       }
     } catch (err: any) {
-      console.error('Voice processing error:', err);
+      console.error('Voice intent processing error:', err);
       setState(prev => ({
         ...prev,
         isProcessing: false,
-        error: err.message || 'Error parsing command'
+        error: err.message || 'Error executing voice command'
       }));
     }
   }, [onIntentProcessed, speakText]);
 
-  const startListening = useCallback(() => {
-    if (typeof window === 'undefined') return;
-
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setState(prev => ({ ...prev, error: 'Speech Recognition is not supported in this browser.' }));
-      return;
-    }
+  // Transcribe Recorded Audio Blob via Groq Whisper API
+  const transcribeAudioBlob = useCallback(async (audioBlob: Blob, lang: string) => {
+    setState(prev => ({ ...prev, isProcessing: true, transcript: 'Transcribing speech via Groq Whisper...' }));
 
     try {
-      if (recognitionRef.current) {
-        recognitionRef.current.abort();
+      const formData = new FormData();
+      formData.append('file', audioBlob, 'voice_recording.webm');
+      formData.append('language', lang);
+
+      const res = await fetch('/api/speech', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Groq transcription failed');
       }
 
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.lang = state.language;
+      const data = await res.json();
+      const transcribedText = data.transcript || '';
 
-      recognition.onstart = () => {
+      if (transcribedText.trim()) {
+        setState(prev => ({ ...prev, transcript: transcribedText }));
+        await processTranscript(transcribedText, lang);
+      } else {
         setState(prev => ({
           ...prev,
-          isListening: true,
-          transcript: '',
-          error: null
+          isProcessing: false,
+          error: 'No speech detected. Please speak clearly into the microphone.'
         }));
-      };
+      }
+    } catch (err: any) {
+      console.error('Audio transcription error:', err);
+      setState(prev => ({
+        ...prev,
+        isProcessing: false,
+        error: `Voice recognition error: ${err.message}`
+      }));
+    }
+  }, [processTranscript]);
 
-      recognition.onresult = (event: any) => {
-        let currentTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          currentTranscript += event.results[i][0].transcript;
-        }
-        setState(prev => ({ ...prev, transcript: currentTranscript }));
-      };
+  // Start Voice Recording with Explicit Mic Permission Request
+  const startListening = useCallback(async () => {
+    if (typeof window === 'undefined') return;
 
-      recognition.onerror = (event: any) => {
-        console.warn('Speech recognition error:', event.error);
-        if (event.error !== 'no-speech') {
+    setState(prev => ({
+      ...prev,
+      isListening: true,
+      transcript: 'Listening... (Speak now)',
+      error: null
+    }));
+
+    // Method A: Try Browser MediaRecorder API with Groq Whisper (High Accuracy)
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+        audioChunksRef.current = [];
+
+        const mediaRecorder = new MediaRecorder(stream, {
+          mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : ''
+        });
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+          }
+          if (audioBlob.size > 0) {
+            transcribeAudioBlob(audioBlob, state.language);
+          }
+        };
+
+        mediaRecorderRef.current = mediaRecorder;
+        mediaRecorder.start();
+        return;
+      } catch (micErr: any) {
+        console.warn('Microphone permission or MediaRecorder error:', micErr);
+        if (micErr.name === 'NotAllowedError' || micErr.name === 'PermissionDeniedError') {
           setState(prev => ({
             ...prev,
             isListening: false,
-            error: `Voice error: ${event.error}`
+            error: 'Microphone permission denied. Please allow microphone access in your browser address bar.'
           }));
+          return;
         }
-      };
-
-      recognition.onend = () => {
-        setState(prev => {
-          if (prev.transcript && prev.isListening) {
-            // Process automatically on speech end
-            processTranscript(prev.transcript, prev.language);
-          }
-          return { ...prev, isListening: false };
-        });
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (e: any) {
-      console.error('Failed to start speech recognition:', e);
-      setState(prev => ({ ...prev, isListening: false, error: e.message }));
+      }
     }
-  }, [state.language, processTranscript]);
 
+    // Method B: Web Speech API Fallback
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.lang = state.language;
+
+        recognition.onstart = () => {
+          setState(prev => ({ ...prev, isListening: true, transcript: '', error: null }));
+        };
+
+        recognition.onresult = (event: any) => {
+          let currentTranscript = '';
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            currentTranscript += event.results[i][0].transcript;
+          }
+          setState(prev => ({ ...prev, transcript: currentTranscript }));
+        };
+
+        recognition.onerror = (event: any) => {
+          setState(prev => ({ ...prev, isListening: false, error: `Voice error: ${event.error}` }));
+        };
+
+        recognition.onend = () => {
+          setState(prev => {
+            if (prev.transcript && prev.isListening) {
+              processTranscript(prev.transcript, prev.language);
+            }
+            return { ...prev, isListening: false };
+          });
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
+        return;
+      } catch (e: any) {
+        console.error('Speech recognition error:', e);
+      }
+    }
+
+    setState(prev => ({
+      ...prev,
+      isListening: false,
+      error: 'Microphone access is not supported or blocked by browser settings.'
+    }));
+  }, [state.language, transcribeAudioBlob, processTranscript]);
+
+  // Stop Listening & Finalize Recording
   const stopListening = useCallback(() => {
+    setState(prev => ({ ...prev, isListening: false }));
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+
     if (recognitionRef.current) {
-      recognitionRef.current.stop();
-      setState(prev => ({ ...prev, isListening: false }));
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
     }
   }, []);
 

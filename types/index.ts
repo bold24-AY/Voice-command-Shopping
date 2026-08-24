@@ -61,6 +61,7 @@ export interface ExtractedItem {
   unit: string;
   category?: CategoryType;
   price?: number;
+  matchedProduct?: Product;
 }
 
 export interface VoiceIntentResult {
@@ -76,6 +77,8 @@ export interface VoiceIntentResult {
   language?: string;
   originalTranscript: string;
   spokenResponse: string;
+  unmatchedItem?: string;
+  errorMessage?: string;
 }
 
 export interface VoiceState {
